@@ -20,6 +20,7 @@ public class UdpConfig
 }
 public class UdpAudioSender : IDisposable
 {
+    private bool connectedToRouter = true;
     private readonly IPEndPoint sendingEndPoint;
     private readonly UdpClient udpClient;
     private UdpClient listener;
@@ -85,28 +86,38 @@ public class UdpAudioSender : IDisposable
                 var endPoint = new IPEndPoint(IPAddress.Parse(config.ReceiveUdp.Address), config.ReceiveUdp.Port);
                 byte[] receivedBytes = listener.Receive(ref endPoint);
 
-                uint srcId = (uint)(receivedBytes[receivedBytes.Length - 8] << 24) |
-                             (uint)(receivedBytes[receivedBytes.Length - 7] << 16) |
-                             (uint)(receivedBytes[receivedBytes.Length - 6] << 8) |
-                             (uint)(receivedBytes[receivedBytes.Length - 5]);
+                int expectedLength = connectedToRouter ? 324 : 328;
 
-                uint dstId = (uint)(receivedBytes[receivedBytes.Length - 4] << 24) |
-                             (uint)(receivedBytes[receivedBytes.Length - 3] << 16) |
-                             (uint)(receivedBytes[receivedBytes.Length - 2] << 8) |
-                             (uint)(receivedBytes[receivedBytes.Length - 1]);
-
-                // Console.WriteLine($"SrcId: {srcId} and DstId: {dstId}");
-                if (!isReceivingAudio)
+                if (receivedBytes.Length < expectedLength)
                 {
-                    Console.WriteLine($"Recieved network call: SRC_ID: {srcId} DST_ID: {dstId}");
-                    isReceivingAudio = true;
+                    Console.WriteLine($"Received unexpected data {receivedBytes.Length}");
+                    continue;
                 }
 
+                int srcId = (receivedBytes[0] << 24) |
+                            (receivedBytes[1] << 16) |
+                            (receivedBytes[2] << 8) |
+                            receivedBytes[3];
+
+                int audioDataStartIndex = 4;
+                int audioDataLength = connectedToRouter ? 316 : 320;
+
+                int dstId = 0;
+                if (!connectedToRouter)
+                {
+                    dstId = (receivedBytes[4] << 24) |
+                            (receivedBytes[5] << 16) |
+                            (receivedBytes[6] << 8) |
+                            receivedBytes[7];
+                    audioDataStartIndex = 8;
+                }
+
+                Console.WriteLine($"Received network call: srcId: {srcId}, dstId: {dstId}");
                 inactivityTimer.Stop();
                 inactivityTimer.Start();
 
-                byte[] audioData = new byte[receivedBytes.Length - 16];
-                Buffer.BlockCopy(receivedBytes, 4, audioData, 0, audioData.Length);
+                byte[] audioData = new byte[audioDataLength];
+                Buffer.BlockCopy(receivedBytes, audioDataStartIndex, audioData, 0, audioDataLength);
 
                 waveProvider.AddSamples(audioData, 0, audioData.Length);
             }
@@ -116,17 +127,27 @@ public class UdpAudioSender : IDisposable
             }
         }
     }
+
     private void WaveIn_DataAvailable(object sender, WaveInEventArgs e)
     {
         if (isSending)
         {
-            byte[] audioPacket = new byte[e.BytesRecorded + 4];
+            byte[] audioDataToSend = new byte[320];
+
+            Buffer.BlockCopy(e.Buffer, 0, audioDataToSend, 0, Math.Min(e.BytesRecorded, 320));
+
+            byte[] audioPacket = new byte[328];
+
+            Buffer.BlockCopy(audioDataToSend, 0, audioPacket, 0, 320);
 
             byte[] srcIdBytes = BitConverter.GetBytes(srcId);
             Array.Reverse(srcIdBytes);
-            Buffer.BlockCopy(srcIdBytes, 0, audioPacket, 0, 4);
+            Buffer.BlockCopy(srcIdBytes, 0, audioPacket, 320, 4);
 
-            Buffer.BlockCopy(e.Buffer, 0, audioPacket, 4, e.BytesRecorded);
+            uint dstId = 31611;
+            byte[] dstIdBytes = BitConverter.GetBytes(connectedToRouter ? 0 : dstId);
+            Array.Reverse(dstIdBytes);
+            Buffer.BlockCopy(dstIdBytes, 0, audioPacket, 324, 4);
 
             udpClient.Send(audioPacket, audioPacket.Length, sendingEndPoint);
         }
