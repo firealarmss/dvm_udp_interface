@@ -1,0 +1,7 @@
+SrcId: 12345678
+ReceiveUdp:
+  Address: 127.0.0.1
+  Port: 34001
+SendUdp:
+  Address: 127.0.0.1
+  Port: 32001
