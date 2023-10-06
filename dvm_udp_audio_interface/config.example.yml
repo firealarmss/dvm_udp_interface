@@ -1,5 +1,6 @@
 SrcId: 12345678
 DstId: 1
+Vox: true
 MetaData: false
 ReceiveUdp:
   Address: 127.0.0.1
