@@ -1,4 +1,6 @@
 SrcId: 12345678
+DstId: 1
+MetaData: false
 ReceiveUdp:
   Address: 127.0.0.1
   Port: 34001

@@ -9,6 +9,10 @@ using NAudio.Wave;
 public class AppConfig
 {
     public uint SrcId { get; set; }
+    public bool MetaData { get; set; }
+    public uint DstId { get; set; }
+    public bool Vox { get; set; }
+
     public UdpConfig ReceiveUdp { get; set; }
     public UdpConfig SendUdp { get; set; }
 }
@@ -20,7 +24,7 @@ public class UdpConfig
 }
 public class UdpAudioSender : IDisposable
 {
-    private bool connectedToRouter = true;
+    private bool connectedToRouter = false;
     private readonly IPEndPoint sendingEndPoint;
     private readonly UdpClient udpClient;
     private UdpClient listener;
@@ -33,6 +37,10 @@ public class UdpAudioSender : IDisposable
     private readonly AppConfig config;
 
     private uint srcId;
+    private bool MetaData;
+    private uint dstId;
+    private bool vox;
+    private const float VoiceActivationThreshold = 0.05f;
 
     private AppConfig LoadConfig(string path)
     {
@@ -45,6 +53,10 @@ public class UdpAudioSender : IDisposable
     {
         config = LoadConfig(configPath);
         srcId = config.SrcId;
+        dstId = config.DstId;
+        vox = config.Vox;
+
+        MetaData = config.MetaData;
         udpClient = new UdpClient();
         sendingEndPoint = new IPEndPoint(IPAddress.Parse(config.SendUdp.Address), config.SendUdp.Port);
     }
@@ -75,7 +87,10 @@ public class UdpAudioSender : IDisposable
         waveIn.DataAvailable += WaveIn_DataAvailable;
         waveIn.WaveFormat = new WaveFormat(8000, 16, 1);
         waveIn.StartRecording();
-        isSending = true;
+        if (!vox)
+        {
+            isSending = true;
+        }
     }
     private void ListenForPackets()
     {
@@ -88,12 +103,12 @@ public class UdpAudioSender : IDisposable
 
                 int expectedLength = connectedToRouter ? 324 : 328;
 
-                if (receivedBytes.Length < expectedLength)
-                {
-                    Console.WriteLine($"Received unexpected data {receivedBytes.Length}");
-                    continue;
-                }
-
+                /*                if (receivedBytes.Length < expectedLength || receivedBytes.Length == 320)
+                                {
+                                    Console.WriteLine($"Received unexpected data {receivedBytes.Length}");
+                                    continue;
+                                }*/
+                Console.WriteLine(receivedBytes.Length);
                 int srcId = (receivedBytes[0] << 24) |
                             (receivedBytes[1] << 16) |
                             (receivedBytes[2] << 8) |
@@ -105,11 +120,18 @@ public class UdpAudioSender : IDisposable
                 int dstId = 0;
                 if (!connectedToRouter)
                 {
-                    dstId = (receivedBytes[4] << 24) |
-                            (receivedBytes[5] << 16) |
-                            (receivedBytes[6] << 8) |
-                            receivedBytes[7];
+                    dstId = (receivedBytes[7] << 24) |
+                            (receivedBytes[6] << 16) |
+                            (receivedBytes[5] << 8) |
+                            receivedBytes[4];
                     audioDataStartIndex = 8;
+                }
+
+                if (!MetaData)
+                {
+                    audioDataStartIndex = 0;
+                    srcId = 0;
+                    dstId = 0;
                 }
 
                 Console.WriteLine($"Received network call: srcId: {srcId}, dstId: {dstId}");
@@ -130,27 +152,62 @@ public class UdpAudioSender : IDisposable
 
     private void WaveIn_DataAvailable(object sender, WaveInEventArgs e)
     {
+        //Console.WriteLine(isSending);
+        if (vox)
+        {
+            float volume = CalculateVolume(e.Buffer, e.BytesRecorded);
+            if (volume > VoiceActivationThreshold)
+            {
+                isSending = true;
+            }
+            else
+            {
+                isSending = false;
+            }
+         //   Console.WriteLine($"Volume: {volume}");
+        }
         if (isSending)
         {
             byte[] audioDataToSend = new byte[320];
 
             Buffer.BlockCopy(e.Buffer, 0, audioDataToSend, 0, Math.Min(e.BytesRecorded, 320));
 
-            byte[] audioPacket = new byte[328];
+            byte[] audioPacket;
 
-            Buffer.BlockCopy(audioDataToSend, 0, audioPacket, 0, 320);
+            if (MetaData)
+            {
+                audioPacket = new byte[328];
 
-            byte[] srcIdBytes = BitConverter.GetBytes(srcId);
-            Array.Reverse(srcIdBytes);
-            Buffer.BlockCopy(srcIdBytes, 0, audioPacket, 320, 4);
+                Buffer.BlockCopy(audioDataToSend, 0, audioPacket, 0, 320);
 
-            uint dstId = 31611;
-            byte[] dstIdBytes = BitConverter.GetBytes(connectedToRouter ? 0 : dstId);
-            Array.Reverse(dstIdBytes);
-            Buffer.BlockCopy(dstIdBytes, 0, audioPacket, 324, 4);
+                byte[] srcIdBytes = BitConverter.GetBytes(srcId);
+                Array.Reverse(srcIdBytes);
+                Buffer.BlockCopy(srcIdBytes, 0, audioPacket, 320, 4);
+
+                byte[] dstIdBytes = BitConverter.GetBytes(connectedToRouter ? 0 : dstId);
+                Array.Reverse(dstIdBytes);
+                Buffer.BlockCopy(dstIdBytes, 0, audioPacket, 324, 4);
+            }
+            else
+            {
+                audioPacket = audioDataToSend;
+            }
 
             udpClient.Send(audioPacket, audioPacket.Length, sendingEndPoint);
         }
+    }
+
+    private float CalculateVolume(byte[] buffer, int bytesRecorded)
+    {
+        float max = 0;
+        for (int index = 0; index < bytesRecorded; index += 2)
+        {
+            short sample = (short)((buffer[index + 1] << 8) | buffer[index]);
+            float sample32 = sample / 32768.0f;
+            if (sample32 < 0) sample32 = -sample32;
+            if (sample32 > max) max = sample32;
+        }
+        return max;
     }
 
     public void StopCaptureAndSend()
@@ -195,21 +252,30 @@ public class UdpAudioSender : IDisposable
         using (UdpAudioSender handler = new UdpAudioSender("config.yml"))
         {
             handler.StartListening();
+            handler.StartCaptureAndSend(); // Start capturing immediately for VOX mode
 
             while (true)
             {
-                Console.WriteLine("Waitin");
-                Console.ReadLine();
-
-                if (handler.isSending)
+                if (!handler.config.Vox)
                 {
-                    handler.StopCaptureAndSend();
-                    Console.WriteLine("Unkeyed");
+                    Console.WriteLine("Press Enter to start/stop sending audio.");
+                    Console.ReadLine();
+
+                    if (handler.isSending)
+                    {
+                        handler.StopCaptureAndSend();
+                        Console.WriteLine("Stopped Sending");
+                    }
+                    else
+                    {
+                        handler.StartCaptureAndSend();
+                        Console.WriteLine("Started Sending");
+                    }
                 }
                 else
                 {
-                    handler.StartCaptureAndSend();
-                    Console.WriteLine("Keyed");
+                    Console.WriteLine("Voice activated mode. Speak to send audio.");
+                    Task.Delay(5000).Wait();
                 }
             }
         }
